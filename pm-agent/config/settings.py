@@ -89,6 +89,15 @@ class VaultConfig(BaseSettings):
         return resolved
 
 
+class LoggingConfig(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="", env_file=_ENV_FILE, populate_by_name=True, extra="ignore"
+    )
+
+    json_logs: bool = Field(default=True, alias="JSON_LOGS")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+
 class MonitoringConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="", env_file=_ENV_FILE, populate_by_name=True, extra="ignore"
@@ -108,11 +117,22 @@ class MonitoringConfig(BaseSettings):
         self.cost_log_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+# Labels sent to Vertex AI for GCP cost attribution and included in local
+# cost logs.  Defined once here so agent.py and cost_tracker.py stay in sync.
+VERTEX_LABELS: dict[str, str] = {
+    "cy_dept": "engineering",
+    "cy_dept_group": "analytics",
+    "cy_project": "pm_agent",
+    "cy_env_type": "testing",
+}
+
+
 class Settings(BaseSettings):
     gcp: GCPConfig = Field(default_factory=GCPConfig)
     jira: JiraConfig = Field(default_factory=JiraConfig)
     vault: VaultConfig = Field(default_factory=VaultConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     def initialize(self) -> None:
         """Ensure all required directories exist."""
@@ -123,3 +143,8 @@ class Settings(BaseSettings):
 # Singleton for import convenience
 settings = Settings()
 settings.initialize()
+
+# Configure structured logging on first import of settings.
+from config.logging import configure_logging  # noqa: E402
+
+configure_logging(json_logs=settings.logging.json_logs, log_level=settings.logging.log_level)

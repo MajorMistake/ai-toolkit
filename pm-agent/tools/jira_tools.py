@@ -12,11 +12,15 @@ return types stay identical. Only the internal implementation changes.
 
 from __future__ import annotations
 
+import structlog
+
 from tools.jira_mock_data import (
     MOCK_TICKETS,
     MOCK_SPRINT,
     MOCK_TRANSITIONS,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 def get_current_sprint() -> dict:
@@ -27,6 +31,7 @@ def get_current_sprint() -> dict:
     """
     # TODO: Real implementation uses Jira REST API:
     # GET /rest/agile/1.0/board/{boardId}/sprint?state=active
+    logger.debug("tool_called", tool="get_current_sprint", sprint=MOCK_SPRINT["name"])
     return MOCK_SPRINT
 
 
@@ -43,6 +48,7 @@ def get_sprint_tickets(sprint_id: int | None = None) -> list[dict]:
     """
     # TODO: Real implementation uses:
     # GET /rest/agile/1.0/sprint/{sprintId}/issue?jql=assignee=currentUser()
+    logger.debug("tool_called", tool="get_sprint_tickets", ticket_count=len(MOCK_TICKETS))
     return [
         {
             "key": t["key"],
@@ -74,7 +80,9 @@ def get_ticket_details(ticket_key: str) -> dict:
     # GET /rest/api/3/issue/{issueIdOrKey}?expand=changelog
     ticket = MOCK_TICKETS.get(ticket_key)
     if not ticket:
+        logger.warning("tool_called", tool="get_ticket_details", ticket_key=ticket_key, found=False)
         return {"error": f"Ticket {ticket_key} not found"}
+    logger.debug("tool_called", tool="get_ticket_details", ticket_key=ticket_key, found=True)
     return ticket
 
 
@@ -116,6 +124,7 @@ def post_comment(ticket_key: str, comment_body: str) -> dict:
     # POST /rest/api/3/issue/{issueIdOrKey}/comment
     ticket = MOCK_TICKETS.get(ticket_key)
     if not ticket:
+        logger.warning("tool_called", tool="post_comment", ticket_key=ticket_key, found=False)
         return {"error": f"Ticket {ticket_key} not found"}
 
     # In mock mode, append to the ticket's comments in memory
@@ -126,6 +135,7 @@ def post_comment(ticket_key: str, comment_body: str) -> dict:
     }
     ticket["comments"].append(new_comment)
 
+    logger.info("tool_write", tool="post_comment", ticket_key=ticket_key, mock=True)
     return {
         "status": "posted",
         "ticket": ticket_key,
@@ -163,6 +173,10 @@ def update_ticket_status(ticket_key: str, transition_id: str) -> dict:
     old_status = ticket["status"]
     ticket["status"] = transition["to"]
 
+    logger.info(
+        "tool_write", tool="update_ticket_status",
+        ticket_key=ticket_key, from_status=old_status, to_status=transition["to"], mock=True,
+    )
     return {
         "status": "transitioned",
         "ticket": ticket_key,
@@ -220,6 +234,10 @@ def create_subtask(parent_key: str, summary: str, description: str = "") -> dict
     MOCK_TICKETS[subtask_key] = subtask
     parent["subtasks"].append({"key": subtask_key, "summary": summary, "status": "To Do"})
 
+    logger.info(
+        "tool_write", tool="create_subtask",
+        parent_key=parent_key, subtask_key=subtask_key, mock=True,
+    )
     return {
         "status": "created",
         "subtask": subtask_key,

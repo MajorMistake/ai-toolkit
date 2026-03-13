@@ -11,7 +11,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from config.settings import Settings, VaultConfig, MonitoringConfig, JiraConfig
+from config.settings import Settings, VaultConfig, MonitoringConfig, JiraConfig, VERTEX_LABELS
 from monitoring.cost_tracker import CostTracker, CallRecord, estimate_cost, MODEL_PRICING
 
 
@@ -145,12 +145,49 @@ class TestCostTracker:
         assert record.total_tokens == 300
         assert config.cost_log_path.exists()
 
-        # Verify JSONL format
+        # Verify JSONL format and billing labels
         with open(config.cost_log_path) as f:
             line = f.readline()
             data = json.loads(line)
             assert data["model"] == "gemini-2.5-flash"
             assert data["billing_labels"]["workflow"] == "test"
+            # Shared Vertex labels should be present
+            for key, value in VERTEX_LABELS.items():
+                assert data["billing_labels"][key] == value
+            assert data["billing_labels"]["agent"] == "pm-agent"
+
+    def test_log_call_includes_ticket_label(self, tmp_path):
+        config = MonitoringConfig(cost_log_path=tmp_path / "test_log.jsonl")
+        tracker = CostTracker(config)
+
+        record = tracker.log_call(
+            model="gemini-2.5-flash",
+            input_tokens=100,
+            output_tokens=200,
+            latency_ms=500.0,
+            workflow="agent",
+            ticket="DATA-3401",
+        )
+
+        with open(config.cost_log_path) as f:
+            data = json.loads(f.readline())
+            assert data["billing_labels"]["ticket"] == "DATA-3401"
+
+    def test_log_call_omits_ticket_label_when_none(self, tmp_path):
+        config = MonitoringConfig(cost_log_path=tmp_path / "test_log.jsonl")
+        tracker = CostTracker(config)
+
+        tracker.log_call(
+            model="gemini-2.5-flash",
+            input_tokens=100,
+            output_tokens=200,
+            latency_ms=500.0,
+            workflow="test",
+        )
+
+        with open(config.cost_log_path) as f:
+            data = json.loads(f.readline())
+            assert "ticket" not in data["billing_labels"]
 
     def test_log_multiple_calls(self, tmp_path):
         config = MonitoringConfig(cost_log_path=tmp_path / "test_log.jsonl")
@@ -237,6 +274,201 @@ class TestCostTracker:
 
         summary = tracker.get_summary()
         assert summary["total_calls"] == 0
+
+
+# --- Write gate (before_tool_callback) tests ---
+
+
+def _make_mock_tool(name: str):
+    """Create a mock tool object with a .name attribute."""
+
+    class MockTool:
+        pass
+
+    t = MockTool()
+    t.name = name
+    return t
+
+
+def _make_mock_tool_context(user_text: str | None = None, write_mode: str = "confirm"):
+    """Create a mock tool_context with a fake session containing one user message."""
+
+    class MockPart:
+        def __init__(self, text):
+            self.text = text
+
+    class MockContent:
+        def __init__(self, parts):
+            self.parts = parts
+
+    class MockEvent:
+        def __init__(self, author, text=None):
+            self.author = author
+            self.content = MockContent([MockPart(text)]) if text else None
+
+    class MockSession:
+        def __init__(self, events):
+            self.events = events
+
+    events = []
+    if user_text is not None:
+        events.append(MockEvent("user", user_text))
+
+    ctx = type("MockCtx", (), {"session": MockSession(events), "state": {}})()
+    return ctx
+
+
+class TestWriteGate:
+    """Tests for the before_tool_callback write-gating logic."""
+
+    @pytest.fixture(autouse=True)
+    def patch_write_mode(self, monkeypatch):
+        """Default write_mode to 'confirm' for these tests."""
+        settings_module = sys.modules["config.settings"]
+        self._original_settings = settings_module.settings
+        # We'll monkeypatch per-test where needed
+
+    def _patch_mode(self, monkeypatch, mode: str):
+        from config.settings import settings as real_settings
+        monkeypatch.setattr(real_settings.jira, "write_mode", mode)
+
+    @pytest.mark.asyncio
+    async def test_read_tools_always_pass(self):
+        from agents.planner.agent import _confirm_before_write
+
+        ctx = _make_mock_tool_context()
+        result = await _confirm_before_write(
+            tool=_make_mock_tool("get_sprint_tickets"),
+            args={},
+            tool_context=ctx,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_local_only_blocks_write(self, monkeypatch):
+        from agents.planner.agent import _confirm_before_write
+
+        self._patch_mode(monkeypatch, "local_only")
+
+        ctx = _make_mock_tool_context(user_text="go ahead")
+        result = await _confirm_before_write(
+            tool=_make_mock_tool("post_comment"),
+            args={},
+            tool_context=ctx,
+        )
+        assert result is not None
+        assert result["status"] == "blocked"
+        assert "local_only" in result["reason"]
+
+    @pytest.mark.asyncio
+    async def test_live_mode_allows_write(self, monkeypatch):
+        from agents.planner.agent import _confirm_before_write
+
+        self._patch_mode(monkeypatch, "live")
+
+        ctx = _make_mock_tool_context()
+        result = await _confirm_before_write(
+            tool=_make_mock_tool("post_comment"),
+            args={},
+            tool_context=ctx,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_blocks_without_approval(self, monkeypatch):
+        from agents.planner.agent import _confirm_before_write
+
+        self._patch_mode(monkeypatch, "confirm")
+
+        ctx = _make_mock_tool_context(user_text="break down DATA-3401")
+        result = await _confirm_before_write(
+            tool=_make_mock_tool("post_comment"),
+            args={},
+            tool_context=ctx,
+        )
+        assert result is not None
+        assert result["status"] == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_confirm_allows_with_approval(self, monkeypatch):
+        from agents.planner.agent import _confirm_before_write
+
+        self._patch_mode(monkeypatch, "confirm")
+
+        ctx = _make_mock_tool_context(user_text="yes, go ahead")
+        result = await _confirm_before_write(
+            tool=_make_mock_tool("post_comment"),
+            args={},
+            tool_context=ctx,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_blocks_without_session(self, monkeypatch):
+        from agents.planner.agent import _confirm_before_write
+
+        self._patch_mode(monkeypatch, "confirm")
+
+        ctx = type("MockCtx", (), {"session": None, "state": {}})()
+        result = await _confirm_before_write(
+            tool=_make_mock_tool("create_subtask"),
+            args={},
+            tool_context=ctx,
+        )
+        assert result is not None
+        assert result["status"] == "blocked"
+
+
+class TestApprovalPhraseMatching:
+    """Tests for word-boundary matching on approval phrases."""
+
+    def test_exact_yes(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="yes")
+        assert _user_approved(ctx) is True
+
+    def test_yes_in_sentence(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="yes, that looks good")
+        assert _user_approved(ctx) is True
+
+    def test_yesterday_no_match(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="I worked on this yesterday")
+        assert _user_approved(ctx) is False
+
+    def test_lgtm(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="lgtm, ship it")
+        assert _user_approved(ctx) is True
+
+    def test_no_approval_in_question(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="can you break down this ticket?")
+        assert _user_approved(ctx) is False
+
+    def test_case_insensitive(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="APPROVED")
+        assert _user_approved(ctx) is True
+
+    def test_no_user_message(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text=None)
+        assert _user_approved(ctx) is False
+
+    def test_proceed_matches(self):
+        from agents.planner.agent import _user_approved
+
+        ctx = _make_mock_tool_context(user_text="please proceed with that")
+        assert _user_approved(ctx) is True
 
 
 # --- Jira tools tests ---

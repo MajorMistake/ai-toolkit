@@ -10,7 +10,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import structlog
+
 from config.settings import settings
+
+logger = structlog.get_logger(__name__)
 
 
 # --- Sprint management ---
@@ -104,6 +108,7 @@ last_updated: {datetime.now(timezone.utc).isoformat()}
 """
     vault.index_file.write_text(index_content)
 
+    logger.info("sprint_setup", sprint_name=sprint_name, sprint_dir=str(sprint_dir))
     return {
         "status": "created",
         "sprint_dir": str(sprint_dir),
@@ -187,6 +192,7 @@ def write_ticket_notes(ticket_key: str, content: str, sprint_name: str | None = 
         return {"error": f"Invalid ticket key: {ticket_key}"}
     ticket_file.write_text(content)
 
+    logger.info("ticket_notes_written", ticket_key=ticket_key, sprint=sprint_dir.name)
     return {
         "status": "written",
         "ticket_key": ticket_key,
@@ -285,6 +291,10 @@ def move_ticket_to_sprint(ticket_key: str, from_sprint: str, to_sprint: str) -> 
     to_file.write_text(from_file.read_text())
     from_file.unlink()
 
+    logger.info(
+        "ticket_moved", ticket_key=ticket_key,
+        from_sprint=from_sprint, to_sprint=to_sprint,
+    )
     return {
         "status": "moved",
         "ticket_key": ticket_key,
@@ -359,6 +369,7 @@ def write_brag_entry(ticket_key: str, content: str, date: str | None = None) -> 
         return {"error": f"Invalid ticket key: {ticket_key}"}
     filepath.write_text(content)
 
+    logger.info("brag_entry_created", ticket_key=ticket_key, filename=filename)
     return {
         "status": "created",
         "filename": filename,

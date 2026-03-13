@@ -21,7 +21,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import structlog
+
 from config.settings import settings
+
+logger = structlog.get_logger(__name__)
 
 
 def get_feedback_context() -> dict:
@@ -44,6 +48,11 @@ def get_feedback_context() -> dict:
     if vault.corrections_file.exists():
         corrections = vault.corrections_file.read_text()
 
+    logger.debug(
+        "feedback_context_loaded",
+        has_preferences=bool(preferences),
+        has_corrections=bool(corrections),
+    )
     return {
         "preferences": preferences,
         "corrections": corrections,
@@ -97,6 +106,11 @@ def record_correction(
     with open(corrections_file, "a") as f:
         f.write(entry)
 
+    logger.info(
+        "correction_recorded",
+        category=category,
+        ticket_key=ticket_key,
+    )
     return {
         "status": "recorded",
         "category": category,

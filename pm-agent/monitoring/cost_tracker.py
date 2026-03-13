@@ -26,16 +26,16 @@ Usage:
 from __future__ import annotations
 
 import json
-import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
+import structlog
 from pydantic import BaseModel, Field
 
-from config.settings import MonitoringConfig
+from config.settings import MonitoringConfig, VERTEX_LABELS
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Pricing per 1M tokens (Vertex AI, USD).
 #
@@ -178,10 +178,7 @@ class CostTracker:
             ticket=ticket,
             tools_called=tools_called or [],
             billing_labels={
-                "cy_dept": "engineering",
-                "cy_dept_group": "analytics",
-                "cy_project": "pm_agent",
-                "cy_env_type": "testing",
+                **VERTEX_LABELS,
                 "agent": self.config.agent_label,
                 "workflow": workflow,
                 **({"ticket": ticket} if ticket else {}),
@@ -192,6 +189,19 @@ class CostTracker:
 
         with open(self._log_path, "a") as f:
             f.write(record.to_json() + "\n")
+
+        logger.info(
+            "llm_call_logged",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            thinking_tokens=thinking_tokens,
+            total_tokens=record.total_tokens,
+            latency_ms=record.latency_ms,
+            estimated_cost_usd=record.estimated_cost_usd,
+            workflow=workflow,
+            ticket=ticket,
+        )
 
         return record
 
@@ -237,7 +247,7 @@ class CostTracker:
                 },
             )
         except Exception:
-            logger.exception("Failed to log LLM call")
+            logger.exception("llm_call_log_failed")
 
         return None
 
